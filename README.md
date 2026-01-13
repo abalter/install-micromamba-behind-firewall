@@ -1,134 +1,309 @@
-# install_micromamba
-Micromamba on Windows (No Admin) + Secure SSL Fix for Corporate Networks
-## Overview
+# Micromamba on Windows (No Admin) + Secure Corporate SSL Fix (Team-Ready)
 
-This guide shows how to:
+This repository provides **team-safe**, **no-admin** PowerShell automation for:
 
-1.  Install **micromamba** in a **user-writable folder** on Windows (no admin).
-2.  Fix common corporate-network SSL errors such as  
-    `schannel: CertGetCertificateChain trust error CERT_TRUST_IS_PARTIAL_CHAIN`  
-    by building a **custom CA bundle** and configuring micromamba via `~\.condarc`—**without disabling SSL verification**.
+1. **Installing micromamba** for the current user (supports **side-by-side installs**, `-WhatIf`, and uninstall/rollback).
+2. **Fixing corporate SSL trust issues** (e.g., TLS inspection / partial chain errors) securely by exporting trusted CA certs from the **CurrentUser** certificate store, creating a **PEM bundle**, and configuring `ssl_verify` in `.condarc` with **backup + rollback**.
 
-Micromamba is a statically linked, self-contained executable that can be installed without admin rights by downloading and extracting it. [\[research.i...astate.edu\]](https://research.it.iastate.edu/micromamba-usage-guide), [\[stackoverflow.com\]](https://stackoverflow.com/questions/66855895/how-to-modify-the-location-of-condarc-file), [\[dmyersturn....github.io\]](https://dmyersturnbull.github.io/guide/mamba-and-conda/)
+> ✅ Security note: We **do not** disable SSL verification. We configure a corporate CA bundle instead.
 
-***
+---
 
-## Part A — Install micromamba (no admin)
+## Contents
 
-### Why this works
+- Why this exists
+- Prerequisites
+- Quick Start (Safe Defaults)
+- Install (Production / Team Adoption)
+- Secure SSL Fix (Production)
+- Testing Without Touching Existing Installations
+- Dry Run / Planning Mode
+- Rollback / Uninstall
+- Customization
+- FAQ / Troubleshooting
+- References
 
-Micromamba is distributed as a **standalone executable** and the docs explicitly provide a PowerShell installation path for Windows.   
-A common Windows tarball extraction layout places `micromamba.exe` under `Library\bin`, which matches the workflow we used. [\[research.i...astate.edu\]](https://research.it.iastate.edu/micromamba-usage-guide), [\[docs.conda.io\]](https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/use-condarc.html) [\[dmyersturn....github.io\]](https://dmyersturnbull.github.io/guide/mamba-and-conda/), [\[stackoverflow.com\]](https://stackoverflow.com/questions/66855895/how-to-modify-the-location-of-condarc-file)
+---
 
-### Use the script
+## Why this exists
 
-1.  Save `Install-Micromamba.ps1` somewhere (e.g., `C:\Users\<you>\Scripts`).
-2.  Run:
+On corporate-managed Windows systems, you may not have admin rights. You may also be behind:
+
+- TLS interception appliances (Zscaler, McAfee Web Gateway, Netskope, etc.)
+- custom enterprise root CAs
+- restricted certificate store policies
+
+In those environments, micromamba installs can fail with errors like:
+
+- `Download error (60) SSL peer certificate or SSH remote key was not OK`
+- `schannel: CertGetCertificateChain trust error CERT_TRUST_IS_PARTIAL_CHAIN`
+
+These scripts provide a secure, user-scope workflow that avoids requiring admin access.
+
+---
+
+## Prerequisites
+
+- Windows PowerShell 5.1 or PowerShell 7+
+- Windows built-in tools:
+  - `tar` (Windows 10/11 typically includes it)
+  - `certutil` (standard on Windows)
+- Network access to conda-forge endpoints (or access via corporate proxy)
+- Ability to read certificates in your **CurrentUser** certificate store (`certmgr.msc`)
+
+---
+
+## Quick Start (Safe Defaults)
+
+### A) Safe micromamba install test (side-by-side, no PATH/profile changes)
+
+This will **NOT overwrite** any existing micromamba installation and does not change PATH/profile.
 
 ```powershell
-# Example: install to ~/micromamba, add to user PATH, initialize PowerShell profile
-.\Install-Micromamba.ps1 -AddToUserPath -InitPowerShellProfile
+.\Install-Micromamba.ps1 -InstallRoot "$HOME\micromamba" -SideBySide
+````
+
+After installation, run micromamba by **full path** (no PATH changes):
+
+```powershell
+# Replace timestamp folder with the one printed by the installer or found in install-manifest.json
+& "$HOME\micromamba\micromamba-YYYYMMDD-HHMMSS\Library\bin\micromamba.exe" --version
 ```
 
-### Notes
-
-*   Adding to **User PATH** modifies only the current user’s environment variables—no admin rights needed.
-*   Setting `MAMBA_ROOT_PREFIX` controls where micromamba stores environments and caches by default. This behavior is described in the installation docs and is central to micromamba’s configuration model. [\[research.i...astate.edu\]](https://research.it.iastate.edu/micromamba-usage-guide), [\[docs.conda.io\]](https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/use-condarc.html)
+✅ This is the recommended way to test safely in a team environment.
 
 ***
 
-## Part B — Secure SSL certificate fix (corporate TLS interception)
+### B) Safe SSL fix test (generate bundle only; no `.condarc` changes)
 
-### Symptoms
-
-After initial success, subsequent installs fail with messages like:
-
-*   `Download error (60) SSL peer certificate or SSH remote key was not OK`
-*   `schannel: CertGetCertificateChain trust error CERT_TRUST_IS_PARTIAL_CHAIN`
-
-This is common on corporate networks that use **TLS inspection** and re-sign external HTTPS traffic with a corporate root CA (e.g., Zscaler, McAfee Web Gateway, etc.). A secure fix is to use your organization’s CA certificate chain as the trust bundle used by conda-family tools. [\[howtouselinux.com\]](https://www.howtouselinux.com/post/curl-60-ssl-certificate-problem-unable-to-get-local-issuer-certificate), [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running)
-
-### Why the CA-bundle approach is secure
-
-Conda explicitly documents that when you are behind a firewall or have **non-standard certificates**, you should point your tooling at the **company-provided root certificate** (or a CA bundle) rather than disabling SSL verification.   
-Micromamba reads configuration from `~\.condarc` (and other rc locations), and it can show where a config value came from using `micromamba config list --sources`. [\[howtouselinux.com\]](https://www.howtouselinux.com/post/curl-60-ssl-certificate-problem-unable-to-get-local-issuer-certificate), [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html) [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running), [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html)
-
-### Approach we used
-
-1.  Identify the corporate root CA in the **CurrentUser** certificate store (no admin).
-2.  Export the root (and any intermediates) to files.
-3.  Convert/export to PEM and concatenate into a single bundle file.
-4.  Set in `~\.condarc`:
-
-```yaml
-ssl_verify: C:\Users\<you>\certs\corp-ca-bundle.pem
-```
-
-Exporting a certificate to disk is supported by PowerShell’s `Export-Certificate` cmdlet.   
-Using `ssl_verify` in `.condarc` is part of conda’s configuration model (YAML runtime config file in your home directory). [\[mamba.readthedocs.io\]](https://mamba.readthedocs.io/en/stable/) [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html), [\[lancelqf.github.io\]](https://lancelqf.github.io/tech/mamba/)
-
-### Use the script
-
-1.  Save `Fix-MicromambaSsl.ps1`.
-2.  Run with defaults (targets Zscaler Root CA by default):
+This generates a CA bundle but does not modify `.condarc` unless you pass `-ApplyCondarc`.
 
 ```powershell
 .\Fix-MicromambaSsl.ps1
 ```
 
-If your org uses something else, pass a different subject pattern:
+Bundle output:
+
+*   `$HOME\certs\corp-ca-bundle.pem`
+
+***
+
+## Install (Production / Team Adoption)
+
+Once the side-by-side install is validated, you can optionally:
+
+### Add micromamba to USER PATH (no admin)
 
 ```powershell
-.\Fix-MicromambaSsl.ps1 -RootSubjectLike @("*McAfee Web Gateway*", "*Nationwide Root CA*")
+.\Install-Micromamba.ps1 -InstallRoot "$HOME\micromamba" -AddToUserPath
 ```
 
-### Verify
+Restart PowerShell to pick up the PATH change.
+
+### Initialize PowerShell profile for activation (optional)
+
+If your team wants `micromamba activate` to work seamlessly in PowerShell, you can use profile init:
+
+```powershell
+.\Install-Micromamba.ps1 -InitProfile -RootPrefix "$HOME\micromamba_root"
+```
+
+> If your org prefers zero profile edits, skip this and use `micromamba run -p <env> <command>` instead.
+
+***
+
+## Secure SSL Fix (Production)
+
+### Apply the fix securely (write `ssl_verify` to `.condarc`)
+
+This backs up the existing `.condarc` before changing it:
+
+```powershell
+.\Fix-MicromambaSsl.ps1 -ApplyCondarc
+```
+
+Verify the configuration source:
 
 ```powershell
 micromamba config list --sources
 ```
 
-You should see something like:
+Expected output includes something like:
 
     ssl_verify: C:\Users\<you>\certs\corp-ca-bundle.pem  # '~\.condarc'
 
-This confirms micromamba is reading your **user `.condarc`** and applying the secure CA-bundle configuration. [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running), [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html)
+***
+
+## Testing Without Touching Existing Installations
+
+### 1) Side-by-side install (best practice)
+
+*   Use `-SideBySide` for install testing.
+*   Do **not** add to PATH or init profile.
+*   Invoke by full path.
+
+### 2) Test SSL config without editing real `~\.condarc`
+
+Micromamba config search supports an override config file via the `CONDARC` environment variable.
+
+Workflow:
+
+```powershell
+# 1) Generate the CA bundle only
+.\Fix-MicromambaSsl.ps1
+
+# 2) Create a temporary test condarc
+$testCondarc = "$HOME\certs\test.condarc"
+"ssl_verify: $HOME\certs\corp-ca-bundle.pem" | Set-Content $testCondarc -Encoding ASCII
+
+# 3) Point this session at the test condarc
+$Env:CONDARC = $testCondarc
+
+# 4) Verify sources and test
+micromamba config list --sources
+micromamba search zlib -c conda-forge
+```
+
+Close the shell to discard the `CONDARC` override.
 
 ***
 
-## Troubleshooting
+## Dry Run / Planning Mode
 
-### “micromamba.exe not found after extraction”
+Both scripts support PowerShell `-WhatIf`:
 
-*   Ensure `tar` is available and extraction succeeded.
-*   Re-run the install script and confirm `InstallDir\Library\bin\micromamba.exe` exists.
-    The Windows extraction recipe using `tar` is a known working approach. [\[dmyersturn....github.io\]](https://dmyersturnbull.github.io/guide/mamba-and-conda/), [\[stackoverflow.com\]](https://stackoverflow.com/questions/66855895/how-to-modify-the-location-of-condarc-file)
+```powershell
+.\Install-Micromamba.ps1 -SideBySide -WhatIf
+.\Fix-MicromambaSsl.ps1 -ApplyCondarc -WhatIf
+```
 
-### “CERT\_TRUST\_IS\_PARTIAL\_CHAIN” persists
+Use `-Confirm` for extra safety in team usage.
 
-*   Add additional corporate root CAs / intermediates from your CurrentUser store into the bundle.
-*   Corporate setups often include multiple inspection roots, and missing intermediates can cause partial-chain trust errors.
-    Conda’s “non-standard certificates” guidance covers these enterprise scenarios and emphasizes using an appropriate CA bundle rather than disabling verification. [\[howtouselinux.com\]](https://www.howtouselinux.com/post/curl-60-ssl-certificate-problem-unable-to-get-local-issuer-certificate), [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running)
+***
 
-### Where is `.condarc` on Windows?
+## Rollback / Uninstall
 
-*   Typically: `C:\Users\<you>\.condarc` (shown as `~\.condarc`)
-*   Conda docs confirm it lives in your home directory by default and is created when you use `conda config` (or you can create it manually). [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html), [\[lancelqf.github.io\]](https://lancelqf.github.io/tech/mamba/)
+### Uninstall micromamba PATH entry and optionally remove files
+
+```powershell
+.\Install-Micromamba.ps1 -Uninstall -RemoveFiles
+```
+
+If you used `-SideBySide`, add `-SideBySide` to target the newest side-by-side install under `InstallRoot`:
+
+```powershell
+.\Install-Micromamba.ps1 -InstallRoot "$HOME\micromamba" -SideBySide -Uninstall -RemoveFiles
+```
+
+### Roll back `.condarc` changes
+
+Restore the newest `.condarc` backup for the chosen `-CondarcPath`:
+
+```powershell
+.\Fix-MicromambaSsl.ps1 -Rollback
+```
+
+Optionally purge generated cert artifacts:
+
+```powershell
+.\Fix-MicromambaSsl.ps1 -Rollback -PurgeGenerated
+```
+
+Backups are stored in:
+
+*   `$HOME\certs\backups\`
+
+***
+
+## Customization
+
+### Install location
+
+```powershell
+.\Install-Micromamba.ps1 -InstallRoot "D:\Tools\micromamba" -SideBySide
+```
+
+### SSL: match different corporate roots
+
+Default root match is `*Zscaler Root CA*`.
+
+To match other roots:
+
+```powershell
+.\Fix-MicromambaSsl.ps1 -RootSubjectLike @("*McAfee Web Gateway*", "*Netskope*", "*YourCorp Root CA*") -ApplyCondarc
+```
+
+### SSL: bundle-only mode (no `.condarc` changes)
+
+```powershell
+.\Fix-MicromambaSsl.ps1
+```
+
+### SSL: bundle + session env vars (optional)
+
+Some toolchains respect `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`:
+
+```powershell
+.\Fix-MicromambaSsl.ps1 -SetSessionEnvVars
+```
+
+***
+
+## FAQ / Troubleshooting
+
+### Q: I don’t want to modify my PowerShell profile.
+
+A: Don’t use `-InitProfile`. Use `micromamba run -p <env> <command>` and call micromamba via full path (or user PATH).
+
+### Q: `tar` is missing.
+
+A: Use Git Bash, or install a tar-capable utility. Windows 10/11 typically includes `tar`.
+
+### Q: SSL still fails after applying the fix.
+
+A: Your network may use a different enterprise root or additional intermediates. Run:
+
+```powershell
+Get-ChildItem Cert:\CurrentUser\Root | Select Subject, Thumbprint
+Get-ChildItem Cert:\CurrentUser\CA   | Select Subject, Issuer, Thumbprint
+```
+
+Then add additional patterns to `-RootSubjectLike` and re-run with `-ApplyCondarc`.
+
+### Q: How do I confirm which config micromamba is using?
+
+A: Run:
+
+```powershell
+micromamba config list --sources
+```
+
+This shows configuration values and their source file.
 
 ***
 
 ## References
 
-*   Micromamba installation docs (PowerShell install; self-contained executable): [\[research.i...astate.edu\]](https://research.it.iastate.edu/micromamba-usage-guide), [\[docs.conda.io\]](https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/use-condarc.html)
-*   Example Windows extraction to `Library\bin` using tar: [\[dmyersturn....github.io\]](https://dmyersturnbull.github.io/guide/mamba-and-conda/), [\[stackoverflow.com\]](https://stackoverflow.com/questions/66855895/how-to-modify-the-location-of-condarc-file)
-*   Mamba/micromamba configuration search paths and `--sources`: [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running)
-*   Conda `.condarc` location/behavior (home directory YAML config): [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html), [\[lancelqf.github.io\]](https://lancelqf.github.io/tech/mamba/)
-*   Conda “non-standard certificates” (CA bundle workflow): [\[howtouselinux.com\]](https://www.howtouselinux.com/post/curl-60-ssl-certificate-problem-unable-to-get-local-issuer-certificate)
-*   PowerShell `Export-Certificate` cmdlet reference: [\[mamba.readthedocs.io\]](https://mamba.readthedocs.io/en/stable/)
+*   Micromamba installation (PowerShell install path, self-contained executable):
+    *   <https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html>
+    *   <https://github.com/mamba-org/mamba/blob/main/docs/source/installation/micromamba-installation.rst>
+*   Example Windows extraction workflow showing `Library\bin` layout:
+    *   <https://kodu.ut.ee/~kmoch/geopython2025/Py_00/Installing_Micromamba.html>
+*   Mamba/micromamba configuration search paths and `--sources`:
+    *   <https://mamba.readthedocs.io/en/latest/user_guide/configuration.html>
+*   Conda `.condarc` configuration file usage and location:
+    *   <https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/use-condarc.html>
+*   Conda non-standard certificates (secure CA bundle workflow):
+    *   <https://docs.conda.io/projects/conda/en/latest/user-guide/configuration/non-standard-certs.html>
+*   PowerShell `Export-Certificate` cmdlet:
+    *   <https://learn.microsoft.com/en-us/powershell/module/pki/export-certificate>
 
-***
+```
 
-## Quick follow-up (to tailor the scripts to your environment)
+---
 
-1.  Do you want the install script to **avoid touching your PowerShell profile** (no `shell init`) and instead use `micromamba run -p <env>` patterns? (Some orgs prefer zero profile changes.)
-2.  Where would you like your environments and package cache to live (e.g., not under OneDrive/profile quotas)? I can add `envs_dirs` and `pkgs_dirs` updates to the scripts in a safe “merge” way using the same config precedence model micromamba documents. [\[stackoverflow.com\]](https://stackoverflow.com/questions/70264976/error-cannot-bind-argument-to-parameter-name-because-it-is-null-when-running), [\[kodu.ut.ee\]](https://kodu.ut.ee/~kmoch/geopython2023/Py_00/Installing_Micromamba.html)
+## If you want, I can also provide a “RELEASING.md” and “CONTRIBUTING.md”
+For team repos, those two often help a lot (e.g., how to validate changes using `-WhatIf`, expected output examples, how to add new corporate CA match patterns safely).
+
+**Quick check:** do you want the README to include a short “Copy/paste examples for Zscaler + McAfee + Netskope” section (so teammates don’t need to edit patterns), or keep it generic?
+```
